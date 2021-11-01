@@ -18,16 +18,17 @@ def main(args):
     model.train()
     for epoch in range(args.num_epochs):
         optimizer.zero_grad()
-        out = model(data)
+        out = model(data, args.tau)
         loss = loss_fn(out[data.train_mask], data.y[data.train_mask])
         loss.backward()
         optimizer.step()
-
-    model.eval()
-    pred = model(data).argmax(dim=1)
-    correct = (pred[data.test_mask] == data.y[data.test_mask]).sum()
-    acc = int(correct) / int(data.test_mask.sum())
-    print('Accuracy: {:.4f}'.format(acc))
+        
+        model.eval()
+        pred = model(data).argmax(dim=1)
+        correct = (pred[data.test_mask] == data.y[data.test_mask]).sum()
+        acc = int(correct) / int(data.test_mask.sum())
+        print('Accuracy: {:.4f}'.format(acc))
+    
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='')
@@ -45,5 +46,6 @@ if __name__ == '__main__':
     parser.add_argument("--K", type=int, default=5, help="number of clusters")
     parser.add_argument("--K1", type=int, default=4, help="size of cluster 1")
     parser.add_argument("--D", type=int, default=4, help="number of division?")
+    parser.add_argument("--tau", type=float, default=1.0, help="softmax temperature")
     args=parser.parse_args()
     main(args)
