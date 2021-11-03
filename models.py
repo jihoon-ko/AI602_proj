@@ -13,17 +13,18 @@ class GCN(torch.nn.Module):
         #self.quants = torch.nn.ModuleList([Quantization(hidden_dim, D, K, k_1) for i in range(num_layers)])
         self.quantization = Quantization(hidden_dim, D, K, k_1)
         
-    def forward(self, data, tau=1.):
+    def forward(self, data, tau=1.0):
         x, edge_index = data.x, data.edge_index
         for i in range(self.num_layers - 1):
             x = self.convs[i](x, edge_index)
             x = F.leaky_relu(x, 0.5)
             x = F.dropout(x, p=0.5, training=self.training)
 
-        x = x + self.quantization(x, tau)
+        _x, reg = self.quantization(x, tau)
+        x = x + _x
+
         x = self.convs[-1](x, edge_index)
-        #x = self.quants[-1](x, tau)
-        return x
+        return x, reg
     
 class Quantization(torch.nn.Module):
     def __init__(self, hidden_dim, D, K, k_1):
@@ -33,6 +34,7 @@ class Quantization(torch.nn.Module):
         self.K = K
         self.k_1 = k_1
         self.register_buffer('k_inds', torch.LongTensor(list(chain.from_iterable([[j for _ in range(k_1 << j)] for j in range(K)]))))
+        self.register_buffer('k_blns', torch.FloatTensor(list(chain.from_iterable([[1.0 / (k_1 << j) for _ in range(k_1 << j)] for j in range(K)]))))
         self.centroids = nn.Parameter(torch.FloatTensor(k_1 * ((1 << K) - 1), hidden_dim))
         self.fc = nn.Linear(K, 1, bias=True)
         
@@ -53,5 +55,12 @@ class Quantization(torch.nn.Module):
         soft_feats = weighted_sums.view(num_nodes, self.K, -1)
         
         quantized_feats = (hard_feats - soft_feats).detach() + soft_feats
-        return torch.max(quantized_feats, dim=1)[0] # / torch.sum(self.fc.weight.data)
-        # return self.fc(quantized_feats.permute(0, 2, 1)).squeeze(-1) # / torch.sum(self.fc.weight.data)
+        #quantized_feats = soft_feats
+        
+        balance = torch.sum(soft_probs, 0) / num_nodes
+        target_balance = self.k_blns.repeat(self.D).view(self.D, -1).T
+        reg = torch.norm(balance - target_balance)
+       
+        pred = torch.max(quantized_feats, dim=1)[0]
+        
+        return pred, reg
