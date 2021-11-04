@@ -4,13 +4,13 @@ from torch import nn
 import torch.nn.functional as F
 import torch_scatter
 from itertools import chain
-
 class GCN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, D, K, k_1):
         super().__init__()
         self.num_layers = num_layers
         self.convs = torch.nn.ModuleList([GCNConv(hidden_dim if i > 0 else input_dim, hidden_dim if i < num_layers - 1 else output_dim) for i in range(num_layers)])
         #self.quants = torch.nn.ModuleList([Quantization(hidden_dim, D, K, k_1) for i in range(num_layers)])
+        self.lns = torch.nn.ModuleList([nn.LayerNorm(hidden_dim) for i in range(num_layers - 1)])
         self.quantization = Quantization(hidden_dim, D, K, k_1)
         
     def forward(self, data, tau=1.0):
@@ -18,11 +18,12 @@ class GCN(torch.nn.Module):
         for i in range(self.num_layers - 1):
             x = self.convs[i](x, edge_index)
             x = F.leaky_relu(x, 0.5)
+#             print(x.shape)
+            #x = self.lns[i](x)
+            #if i == self.num_layers - 2: continue
             x = F.dropout(x, p=0.5, training=self.training)
-
         _x, reg = self.quantization(x, tau)
         x = x + _x
-
         x = self.convs[-1](x, edge_index)
         return x, reg
     
@@ -46,9 +47,13 @@ class Quantization(torch.nn.Module):
         products = H.unsqueeze(1) * self.centroids.unsqueeze(0) # (#nodes, 1, #hiddendim) * (1, #ks, #hiddendim) -> (#nodes, #ks, #hiddendim)
         products = torch.sum(products.view(num_nodes, num_ks, self.D, -1), dim=-1) # (#nodes, #ks, #D)
         _, hard_indices = torch_scatter.scatter_max(products / tau, self.k_inds, dim=1) # (#nodes, #K, #D)
+        print(torch.unique(hard_indices[:,0,:][:,0]).shape[0])
+        print(hard_indices[:20])
         
         hard_feats = torch.gather(self.centroids.repeat(num_nodes, 1, 1), dim=1, index=hard_indices.repeat_interleave(self.hidden_dim // self.D, dim=-1))
         soft_probs = torch_scatter.scatter_softmax(products / tau, self.k_inds, dim=1) # (#nodes, #ks, #D) -> (#nodes, #ks, #D)
+        #print(soft_probs[:20][:,:8][:,:,1].shape)
+        #print(torch.max(soft_probs[:20][:,:8][:,:,1], 1)[1])
         
         normalized_prods = soft_probs.unsqueeze(-1) * self.centroids.view(1, num_ks, self.D, -1) # (#nodes, #ks, #D, #hiddendim/D)
         weighted_sums = torch_scatter.scatter(normalized_prods, self.k_inds, dim=1, dim_size=self.K, reduce='sum')
@@ -59,8 +64,11 @@ class Quantization(torch.nn.Module):
         
         balance = torch.sum(soft_probs, 0) / num_nodes
         target_balance = self.k_blns.repeat(self.D).view(self.D, -1).T
-        reg = torch.norm(balance - target_balance)
-       
+        reg = torch.norm(balance - target_balance, p='fro')
+#         print(torch.sum(balance))
+#         print(torch.sum(target_balance))
+#         print(soft_probs[0])
+        
         pred = torch.max(quantized_feats, dim=1)[0]
         
         return pred, reg
